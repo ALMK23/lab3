@@ -1,0 +1,997 @@
+### Вариант 16. Согласование переводов — полный сценарий.
+### Выполняйте запросы сверху вниз (или «Run All Requests in File»): id сохраняются в переменные.
+### Запросы с «✗» — негативные проверки бизнес-правил, они ДОЛЖНЫ вернуть ошибку.
+
+### ================= 0. Тестовые данные из миграции =================
+### Данные, которые Flyway кладёт в БД при первом запуске (V2__seed_data.sql).
+
+### Список проектов (seed)
+< {%
+    client.global.set("runId", Date.now().toString());
+%}
+GET http://localhost:8080/api/translation-projects
+
+> {%
+    client.test("HTTP 200", () => client.assert(response.status === 200, "Ожидался 200, получен " + response.status));
+    client.test("Массив", () => client.assert(Array.isArray(response.body)));
+%}
+
+### Список переводов (seed)
+GET http://localhost:8080/api/translations
+
+> {%
+    client.test("HTTP 200", () => client.assert(response.status === 200, "Ожидался 200, получен " + response.status));
+    client.test("Массив", () => client.assert(Array.isArray(response.body)));
+%}
+
+### ================= 1. Пользователи — CRUD =================
+### Редактор (владелец проекта) и два переводчика.
+
+### Создать редактора Анну
+POST http://localhost:8080/api/users
+Content-Type: application/json
+
+{
+  "name": "Анна Редакторова",
+  "email": "anna.{{runId}}@example.com"
+}
+
+> {%
+    client.test("HTTP 201", () => client.assert(response.status === 201, "Ожидался 201, получен " + response.status));
+    client.global.set("editorId", response.body["id"]);
+%}
+
+### Создать переводчика Бориса
+POST http://localhost:8080/api/users
+Content-Type: application/json
+
+{
+  "name": "Борис",
+  "email": "boris.{{runId}}@example.com"
+}
+
+> {%
+    client.test("HTTP 201", () => client.assert(response.status === 201, "Ожидался 201, получен " + response.status));
+    client.global.set("translatorId", response.body["id"]);
+%}
+
+### Создать переводчицу Веру
+POST http://localhost:8080/api/users
+Content-Type: application/json
+
+{
+  "name": "Вера Лингвистова",
+  "email": "vera.{{runId}}@example.com"
+}
+
+> {%
+    client.test("HTTP 201", () => client.assert(response.status === 201, "Ожидался 201, получен " + response.status));
+    client.global.set("translator2Id", response.body["id"]);
+%}
+
+### Создать временного пользователя
+POST http://localhost:8080/api/users
+Content-Type: application/json
+
+{
+  "name": "Гость",
+  "email": "guest.{{runId}}@example.com"
+}
+
+> {%
+    client.test("HTTP 201", () => client.assert(response.status === 201, "Ожидался 201, получен " + response.status));
+    client.global.set("tmpUserId", response.body["id"]);
+%}
+
+### Список пользователей
+GET http://localhost:8080/api/users
+
+> {%
+    client.test("HTTP 200", () => client.assert(response.status === 200, "Ожидался 200, получен " + response.status));
+    client.test("Массив", () => client.assert(Array.isArray(response.body)));
+%}
+
+### Пользователь по id
+GET http://localhost:8080/api/users/{{editorId}}
+
+> {%
+    client.test("HTTP 200", () => client.assert(response.status === 200, "Ожидался 200, получен " + response.status));
+    client.test("name = Анна Редакторова", () => client.assert(response.body["name"] === "Анна Редакторова"));
+%}
+
+### Изменить имя Бориса
+PATCH http://localhost:8080/api/users/{{translatorId}}
+Content-Type: application/json
+
+{
+  "name": "Борис Переводов"
+}
+
+> {%
+    client.test("HTTP 200", () => client.assert(response.status === 200, "Ожидался 200, получен " + response.status));
+    client.test("name = Борис Переводов", () => client.assert(response.body["name"] === "Борис Переводов"));
+%}
+
+### ✗ Email уже занят → 409
+POST http://localhost:8080/api/users
+Content-Type: application/json
+
+{
+  "name": "Двойник",
+  "email": "ANNA.{{runId}}@example.com"
+}
+
+> {%
+    client.test("HTTP 409", () => client.assert(response.status === 409, "Ожидался 409, получен " + response.status));
+%}
+
+### Удалить временного пользователя
+DELETE http://localhost:8080/api/users/{{tmpUserId}}
+
+> {%
+    client.test("HTTP 204", () => client.assert(response.status === 204, "Ожидался 204, получен " + response.status));
+%}
+
+### Удалённый пользователь → 404
+GET http://localhost:8080/api/users/{{tmpUserId}}
+
+> {%
+    client.test("HTTP 404", () => client.assert(response.status === 404, "Ожидался 404, получен " + response.status));
+%}
+
+### ================= 2. Проекты — CRUD =================
+### Новый проект всегда создаётся в статусе DRAFT; статус меняют только бизнес-операции.
+
+### Создать проект
+POST http://localhost:8080/api/translation-projects
+Content-Type: application/json
+
+{
+  "name": "Локализация интернет-магазина",
+  "targetLanguage": "en",
+  "ownerId": {{editorId}}
+}
+
+> {%
+    client.test("HTTP 201", () => client.assert(response.status === 201, "Ожидался 201, получен " + response.status));
+    client.global.set("projectId", response.body["id"]);
+    client.test("status = DRAFT", () => client.assert(response.body["status"] === "DRAFT"));
+    client.test("ownerId", () => client.assert(response.body["ownerId"] == client.global.get("editorId")));
+%}
+
+### ✗ Статус напрямую → 400
+POST http://localhost:8080/api/translation-projects
+Content-Type: application/json
+
+{
+  "name": "Хитрый",
+  "targetLanguage": "en",
+  "ownerId": {{editorId}},
+  "status": "COMPLETED"
+}
+
+> {%
+    client.test("HTTP 400", () => client.assert(response.status === 400, "Ожидался 400, получен " + response.status));
+%}
+
+### ✗ Несуществующий владелец → 400
+POST http://localhost:8080/api/translation-projects
+Content-Type: application/json
+
+{
+  "name": "Ничей",
+  "targetLanguage": "en",
+  "ownerId": 999999
+}
+
+> {%
+    client.test("HTTP 400", () => client.assert(response.status === 400, "Ожидался 400, получен " + response.status));
+%}
+
+### Создать пустой проект
+POST http://localhost:8080/api/translation-projects
+Content-Type: application/json
+
+{
+  "name": "Пустой проект",
+  "targetLanguage": "fr",
+  "ownerId": {{editorId}}
+}
+
+> {%
+    client.test("HTTP 201", () => client.assert(response.status === 201, "Ожидался 201, получен " + response.status));
+    client.global.set("emptyProjectId", response.body["id"]);
+%}
+
+### Список проектов
+GET http://localhost:8080/api/translation-projects
+
+> {%
+    client.test("HTTP 200", () => client.assert(response.status === 200, "Ожидался 200, получен " + response.status));
+    client.test("Массив", () => client.assert(Array.isArray(response.body)));
+%}
+
+### Проект по id
+GET http://localhost:8080/api/translation-projects/{{projectId}}
+
+> {%
+    client.test("HTTP 200", () => client.assert(response.status === 200, "Ожидался 200, получен " + response.status));
+    client.test("status = DRAFT", () => client.assert(response.body["status"] === "DRAFT"));
+%}
+
+### Переименовать проект
+PATCH http://localhost:8080/api/translation-projects/{{projectId}}
+Content-Type: application/json
+
+{
+  "name": "Локализация магазина (EN)"
+}
+
+> {%
+    client.test("HTTP 200", () => client.assert(response.status === 200, "Ожидался 200, получен " + response.status));
+    client.test("name = Локализация магазина (EN)", () => client.assert(response.body["name"] === "Локализация магазина (EN)"));
+%}
+
+### ================= 3. Исходные сегменты — CRUD =================
+### Позиция без указания ставится в конец; две позиции в проекте не совпадают.
+
+### Создать сегмент 1
+POST http://localhost:8080/api/source-segments
+Content-Type: application/json
+
+{
+  "projectId": {{projectId}},
+  "sourceText": "Добро пожаловать!"
+}
+
+> {%
+    client.test("HTTP 201", () => client.assert(response.status === 201, "Ожидался 201, получен " + response.status));
+    client.global.set("seg1Id", response.body["id"]);
+    client.test("position = 1", () => client.assert(response.body["position"] === 1));
+%}
+
+### Создать сегмент 2
+POST http://localhost:8080/api/source-segments
+Content-Type: application/json
+
+{
+  "projectId": {{projectId}},
+  "sourceText": "Введите пароль"
+}
+
+> {%
+    client.test("HTTP 201", () => client.assert(response.status === 201, "Ожидался 201, получен " + response.status));
+    client.global.set("seg2Id", response.body["id"]);
+    client.test("position = 2", () => client.assert(response.body["position"] === 2));
+%}
+
+### ✗ Занятая позиция → 409
+POST http://localhost:8080/api/source-segments
+Content-Type: application/json
+
+{
+  "projectId": {{projectId}},
+  "sourceText": "Дубль",
+  "position": 2
+}
+
+> {%
+    client.test("HTTP 409", () => client.assert(response.status === 409, "Ожидался 409, получен " + response.status));
+%}
+
+### Создать временный сегмент
+POST http://localhost:8080/api/source-segments
+Content-Type: application/json
+
+{
+  "projectId": {{projectId}},
+  "sourceText": "Временный текст"
+}
+
+> {%
+    client.test("HTTP 201", () => client.assert(response.status === 201, "Ожидался 201, получен " + response.status));
+    client.global.set("seg3Id", response.body["id"]);
+    client.test("position = 3", () => client.assert(response.body["position"] === 3));
+%}
+
+### Список сегментов
+GET http://localhost:8080/api/source-segments
+
+> {%
+    client.test("HTTP 200", () => client.assert(response.status === 200, "Ожидался 200, получен " + response.status));
+    client.test("Массив", () => client.assert(Array.isArray(response.body)));
+%}
+
+### Сегмент по id
+GET http://localhost:8080/api/source-segments/{{seg2Id}}
+
+> {%
+    client.test("HTTP 200", () => client.assert(response.status === 200, "Ожидался 200, получен " + response.status));
+    client.test("projectId", () => client.assert(response.body["projectId"] == client.global.get("projectId")));
+%}
+
+### Изменить текст сегмента 2
+PATCH http://localhost:8080/api/source-segments/{{seg2Id}}
+Content-Type: application/json
+
+{
+  "sourceText": "Введите пароль ещё раз"
+}
+
+> {%
+    client.test("HTTP 200", () => client.assert(response.status === 200, "Ожидался 200, получен " + response.status));
+    client.test("sourceText = Введите пароль ещё раз", () => client.assert(response.body["sourceText"] === "Введите пароль ещё раз"));
+%}
+
+### Удалить временный сегмент
+DELETE http://localhost:8080/api/source-segments/{{seg3Id}}
+
+> {%
+    client.test("HTTP 204", () => client.assert(response.status === 204, "Ожидался 204, получен " + response.status));
+%}
+
+### ================= 4. БО-1 Запуск проекта =================
+### DRAFT → IN_PROGRESS. Только владелец, нужен хотя бы один сегмент.
+
+### ✗ Запуск проекта без сегментов → 409
+POST http://localhost:8080/api/translation-projects/{{emptyProjectId}}/start
+Content-Type: application/json
+
+{
+  "userId": {{editorId}}
+}
+
+> {%
+    client.test("HTTP 409", () => client.assert(response.status === 409, "Ожидался 409, получен " + response.status));
+%}
+
+### ✗ Запуск не владельцем → 403
+POST http://localhost:8080/api/translation-projects/{{projectId}}/start
+Content-Type: application/json
+
+{
+  "userId": {{translatorId}}
+}
+
+> {%
+    client.test("HTTP 403", () => client.assert(response.status === 403, "Ожидался 403, получен " + response.status));
+%}
+
+### Запустить проект
+POST http://localhost:8080/api/translation-projects/{{projectId}}/start
+Content-Type: application/json
+
+{
+  "userId": {{editorId}}
+}
+
+> {%
+    client.test("HTTP 200", () => client.assert(response.status === 200, "Ожидался 200, получен " + response.status));
+    client.test("status = IN_PROGRESS", () => client.assert(response.body["status"] === "IN_PROGRESS"));
+%}
+
+### ✗ Повторный запуск → 409
+POST http://localhost:8080/api/translation-projects/{{projectId}}/start
+Content-Type: application/json
+
+{
+  "userId": {{editorId}}
+}
+
+> {%
+    client.test("HTTP 409", () => client.assert(response.status === 409, "Ожидался 409, получен " + response.status));
+%}
+
+### ✗ Сменить язык запущенного проекта → 409
+PATCH http://localhost:8080/api/translation-projects/{{projectId}}
+Content-Type: application/json
+
+{
+  "targetLanguage": "de"
+}
+
+> {%
+    client.test("HTTP 409", () => client.assert(response.status === 409, "Ожидался 409, получен " + response.status));
+%}
+
+### Удалить пустой проект
+DELETE http://localhost:8080/api/translation-projects/{{emptyProjectId}}
+
+> {%
+    client.test("HTTP 204", () => client.assert(response.status === 204, "Ожидался 204, получен " + response.status));
+%}
+
+### ================= 5. Переводы — CRUD =================
+### Перевод создаётся черновиком (DRAFT) и только в запущенном проекте.
+
+### Борис переводит сегмент 1
+POST http://localhost:8080/api/translations
+Content-Type: application/json
+
+{
+  "segmentId": {{seg1Id}},
+  "authorId": {{translatorId}},
+  "text": "Welcome!"
+}
+
+> {%
+    client.test("HTTP 201", () => client.assert(response.status === 201, "Ожидался 201, получен " + response.status));
+    client.global.set("t1Id", response.body["id"]);
+    client.test("status = DRAFT", () => client.assert(response.body["status"] === "DRAFT"));
+%}
+
+### Вера переводит сегмент 2
+POST http://localhost:8080/api/translations
+Content-Type: application/json
+
+{
+  "segmentId": {{seg2Id}},
+  "authorId": {{translator2Id}},
+  "text": "Enter password again"
+}
+
+> {%
+    client.test("HTTP 201", () => client.assert(response.status === 201, "Ожидался 201, получен " + response.status));
+    client.global.set("t2Id", response.body["id"]);
+%}
+
+### Вера предлагает свой вариант сегмента 1
+POST http://localhost:8080/api/translations
+Content-Type: application/json
+
+{
+  "segmentId": {{seg1Id}},
+  "authorId": {{translator2Id}},
+  "text": "Hello there!"
+}
+
+> {%
+    client.test("HTTP 201", () => client.assert(response.status === 201, "Ожидался 201, получен " + response.status));
+    client.global.set("t3Id", response.body["id"]);
+%}
+
+### Список переводов
+GET http://localhost:8080/api/translations
+
+> {%
+    client.test("HTTP 200", () => client.assert(response.status === 200, "Ожидался 200, получен " + response.status));
+    client.test("Массив", () => client.assert(Array.isArray(response.body)));
+%}
+
+### Перевод по id
+GET http://localhost:8080/api/translations/{{t1Id}}
+
+> {%
+    client.test("HTTP 200", () => client.assert(response.status === 200, "Ожидался 200, получен " + response.status));
+    client.test("text = Welcome!", () => client.assert(response.body["text"] === "Welcome!"));
+%}
+
+### Поправить черновик
+PATCH http://localhost:8080/api/translations/{{t1Id}}
+Content-Type: application/json
+
+{
+  "text": "Welcome"
+}
+
+> {%
+    client.test("HTTP 200", () => client.assert(response.status === 200, "Ожидался 200, получен " + response.status));
+    client.test("text = Welcome", () => client.assert(response.body["text"] === "Welcome"));
+%}
+
+### ✗ Статус напрямую → 400
+PATCH http://localhost:8080/api/translations/{{t1Id}}
+Content-Type: application/json
+
+{
+  "status": "APPROVED"
+}
+
+> {%
+    client.test("HTTP 400", () => client.assert(response.status === 400, "Ожидался 400, получен " + response.status));
+%}
+
+### ================= 6. БО-2 Отправка на согласование =================
+### DRAFT/REJECTED → SUBMITTED. Только автор; без открытых замечаний; у сегмента один активный перевод.
+
+### ✗ Отправка чужого перевода → 403
+POST http://localhost:8080/api/translations/{{t1Id}}/submit
+Content-Type: application/json
+
+{
+  "userId": {{translator2Id}}
+}
+
+> {%
+    client.test("HTTP 403", () => client.assert(response.status === 403, "Ожидался 403, получен " + response.status));
+%}
+
+### Борис отправляет перевод
+POST http://localhost:8080/api/translations/{{t1Id}}/submit
+Content-Type: application/json
+
+{
+  "userId": {{translatorId}}
+}
+
+> {%
+    client.test("HTTP 200", () => client.assert(response.status === 200, "Ожидался 200, получен " + response.status));
+    client.test("status = SUBMITTED", () => client.assert(response.body["status"] === "SUBMITTED"));
+%}
+
+### ✗ Править текст на согласовании → 409
+PATCH http://localhost:8080/api/translations/{{t1Id}}
+Content-Type: application/json
+
+{
+  "text": "Hi"
+}
+
+> {%
+    client.test("HTTP 409", () => client.assert(response.status === 409, "Ожидался 409, получен " + response.status));
+%}
+
+### ✗ Второй активный перевод сегмента → 409
+POST http://localhost:8080/api/translations/{{t3Id}}/submit
+Content-Type: application/json
+
+{
+  "userId": {{translator2Id}}
+}
+
+> {%
+    client.test("HTTP 409", () => client.assert(response.status === 409, "Ожидался 409, получен " + response.status));
+%}
+
+### Удалить конкурирующий черновик
+DELETE http://localhost:8080/api/translations/{{t3Id}}
+
+> {%
+    client.test("HTTP 204", () => client.assert(response.status === 204, "Ожидался 204, получен " + response.status));
+%}
+
+### ================= 7. БО-3 Отклонение с замечанием =================
+### SUBMITTED → REJECTED и новое замечание OPEN — две сущности в одной транзакции.
+
+### ✗ Отклонение не редактором → 403
+POST http://localhost:8080/api/translations/{{t1Id}}/reject
+Content-Type: application/json
+
+{
+  "userId": {{translatorId}},
+  "comment": "Сам себя"
+}
+
+> {%
+    client.test("HTTP 403", () => client.assert(response.status === 403, "Ожидался 403, получен " + response.status));
+%}
+
+### ✗ Отклонение без замечания → 400
+POST http://localhost:8080/api/translations/{{t1Id}}/reject
+Content-Type: application/json
+
+{
+  "userId": {{editorId}}
+}
+
+> {%
+    client.test("HTTP 400", () => client.assert(response.status === 400, "Ожидался 400, получен " + response.status));
+%}
+
+### Анна отклоняет перевод
+POST http://localhost:8080/api/translations/{{t1Id}}/reject
+Content-Type: application/json
+
+{
+  "userId": {{editorId}},
+  "comment": "Нужно полнее: «Welcome to our store!»"
+}
+
+> {%
+    client.test("HTTP 200", () => client.assert(response.status === 200, "Ожидался 200, получен " + response.status));
+    client.test("translation.status = REJECTED", () => client.assert(response.body["translation"]["status"] === "REJECTED"));
+    client.test("comment.status = OPEN", () => client.assert(response.body["comment"]["status"] === "OPEN"));
+    client.global.set("c1Id", response.body["comment"]["id"]);
+%}
+
+### Замечание появилось
+GET http://localhost:8080/api/editorial-comments/{{c1Id}}
+
+> {%
+    client.test("HTTP 200", () => client.assert(response.status === 200, "Ожидался 200, получен " + response.status));
+    client.test("translationId", () => client.assert(response.body["translationId"] == client.global.get("t1Id")));
+%}
+
+### ================= 8. Замечания — CRUD =================
+### Замечание можно оставить только к переводу на согласовании или отклонённому.
+
+### Добавить второе замечание
+POST http://localhost:8080/api/editorial-comments
+Content-Type: application/json
+
+{
+  "translationId": {{t1Id}},
+  "text": "Проверьте регистр"
+}
+
+> {%
+    client.test("HTTP 201", () => client.assert(response.status === 201, "Ожидался 201, получен " + response.status));
+    client.global.set("c2Id", response.body["id"]);
+    client.test("status = OPEN", () => client.assert(response.body["status"] === "OPEN"));
+%}
+
+### ✗ Замечание к черновику → 409
+POST http://localhost:8080/api/editorial-comments
+Content-Type: application/json
+
+{
+  "translationId": {{t2Id}},
+  "text": "Рано"
+}
+
+> {%
+    client.test("HTTP 409", () => client.assert(response.status === 409, "Ожидался 409, получен " + response.status));
+%}
+
+### Список замечаний
+GET http://localhost:8080/api/editorial-comments
+
+> {%
+    client.test("HTTP 200", () => client.assert(response.status === 200, "Ожидался 200, получен " + response.status));
+    client.test("Массив", () => client.assert(Array.isArray(response.body)));
+%}
+
+### Замечание по id
+GET http://localhost:8080/api/editorial-comments/{{c2Id}}
+
+> {%
+    client.test("HTTP 200", () => client.assert(response.status === 200, "Ожидался 200, получен " + response.status));
+    client.test("text = Проверьте регистр", () => client.assert(response.body["text"] === "Проверьте регистр"));
+%}
+
+### Изменить текст замечания
+PATCH http://localhost:8080/api/editorial-comments/{{c2Id}}
+Content-Type: application/json
+
+{
+  "text": "Проверьте регистр букв"
+}
+
+> {%
+    client.test("HTTP 200", () => client.assert(response.status === 200, "Ожидался 200, получен " + response.status));
+    client.test("text = Проверьте регистр букв", () => client.assert(response.body["text"] === "Проверьте регистр букв"));
+%}
+
+### ✗ Статус напрямую → 400
+PATCH http://localhost:8080/api/editorial-comments/{{c2Id}}
+Content-Type: application/json
+
+{
+  "status": "RESOLVED"
+}
+
+> {%
+    client.test("HTTP 400", () => client.assert(response.status === 400, "Ожидался 400, получен " + response.status));
+%}
+
+### Удалить второе замечание
+DELETE http://localhost:8080/api/editorial-comments/{{c2Id}}
+
+> {%
+    client.test("HTTP 204", () => client.assert(response.status === 204, "Ожидался 204, получен " + response.status));
+%}
+
+### ✗ Повторная отправка с открытым замечанием → 409
+POST http://localhost:8080/api/translations/{{t1Id}}/submit
+Content-Type: application/json
+
+{
+  "userId": {{translatorId}}
+}
+
+> {%
+    client.test("HTTP 409", () => client.assert(response.status === 409, "Ожидался 409, получен " + response.status));
+%}
+
+### ================= 9. БО-5 Устранение замечания =================
+### OPEN → RESOLVED у замечания и исправленный текст у перевода — две сущности сразу.
+
+### ✗ Устранение не автором → 403
+POST http://localhost:8080/api/editorial-comments/{{c1Id}}/resolve
+Content-Type: application/json
+
+{
+  "userId": {{editorId}}
+}
+
+> {%
+    client.test("HTTP 403", () => client.assert(response.status === 403, "Ожидался 403, получен " + response.status));
+%}
+
+### Борис устраняет замечание
+POST http://localhost:8080/api/editorial-comments/{{c1Id}}/resolve
+Content-Type: application/json
+
+{
+  "userId": {{translatorId}},
+  "translationText": "Welcome to our store!"
+}
+
+> {%
+    client.test("HTTP 200", () => client.assert(response.status === 200, "Ожидался 200, получен " + response.status));
+    client.test("comment.status = RESOLVED", () => client.assert(response.body["comment"]["status"] === "RESOLVED"));
+    client.test("translation.text = Welcome to our store!", () => client.assert(response.body["translation"]["text"] === "Welcome to our store!"));
+    client.test("translation.status = REJECTED", () => client.assert(response.body["translation"]["status"] === "REJECTED"));
+%}
+
+### ✗ Повторное устранение → 409
+POST http://localhost:8080/api/editorial-comments/{{c1Id}}/resolve
+Content-Type: application/json
+
+{
+  "userId": {{translatorId}}
+}
+
+> {%
+    client.test("HTTP 409", () => client.assert(response.status === 409, "Ожидался 409, получен " + response.status));
+%}
+
+### Борис отправляет исправленный перевод
+POST http://localhost:8080/api/translations/{{t1Id}}/submit
+Content-Type: application/json
+
+{
+  "userId": {{translatorId}}
+}
+
+> {%
+    client.test("HTTP 200", () => client.assert(response.status === 200, "Ожидался 200, получен " + response.status));
+    client.test("status = SUBMITTED", () => client.assert(response.body["status"] === "SUBMITTED"));
+%}
+
+### ================= 10. БО-4 Утверждение перевода =================
+### SUBMITTED → APPROVED. Только редактор, не автор, без открытых замечаний.
+
+### ✗ Утверждение не редактором → 403
+POST http://localhost:8080/api/translations/{{t1Id}}/approve
+Content-Type: application/json
+
+{
+  "userId": {{translator2Id}}
+}
+
+> {%
+    client.test("HTTP 403", () => client.assert(response.status === 403, "Ожидался 403, получен " + response.status));
+%}
+
+### Анна утверждает перевод сегмента 1
+POST http://localhost:8080/api/translations/{{t1Id}}/approve
+Content-Type: application/json
+
+{
+  "userId": {{editorId}}
+}
+
+> {%
+    client.test("HTTP 200", () => client.assert(response.status === 200, "Ожидался 200, получен " + response.status));
+    client.test("translation.status = APPROVED", () => client.assert(response.body["translation"]["status"] === "APPROVED"));
+    client.test("project.status = IN_PROGRESS", () => client.assert(response.body["project"]["status"] === "IN_PROGRESS"));
+%}
+
+### ✗ Завершить проект рано → 409
+POST http://localhost:8080/api/translation-projects/{{projectId}}/complete
+Content-Type: application/json
+
+{
+  "userId": {{editorId}}
+}
+
+> {%
+    client.test("HTTP 409", () => client.assert(response.status === 409, "Ожидался 409, получен " + response.status));
+%}
+
+### ================= 11. БО-6 Снятие замечания и автопереход в REVIEW =================
+### Редактор снимает неактуальное замечание; утверждение последнего сегмента переводит проект в REVIEW.
+
+### Вера отправляет перевод сегмента 2
+POST http://localhost:8080/api/translations/{{t2Id}}/submit
+Content-Type: application/json
+
+{
+  "userId": {{translator2Id}}
+}
+
+> {%
+    client.test("HTTP 200", () => client.assert(response.status === 200, "Ожидался 200, получен " + response.status));
+    client.test("status = SUBMITTED", () => client.assert(response.body["status"] === "SUBMITTED"));
+%}
+
+### Анна оставляет вопрос к переводу
+POST http://localhost:8080/api/editorial-comments
+Content-Type: application/json
+
+{
+  "translationId": {{t2Id}},
+  "text": "Может, лучше «Re-enter password»?"
+}
+
+> {%
+    client.test("HTTP 201", () => client.assert(response.status === 201, "Ожидался 201, получен " + response.status));
+    client.global.set("c3Id", response.body["id"]);
+%}
+
+### ✗ Утверждение при открытом замечании → 409
+POST http://localhost:8080/api/translations/{{t2Id}}/approve
+Content-Type: application/json
+
+{
+  "userId": {{editorId}}
+}
+
+> {%
+    client.test("HTTP 409", () => client.assert(response.status === 409, "Ожидался 409, получен " + response.status));
+%}
+
+### ✗ Снять замечание не редактором → 403
+POST http://localhost:8080/api/editorial-comments/{{c3Id}}/dismiss
+Content-Type: application/json
+
+{
+  "userId": {{translator2Id}}
+}
+
+> {%
+    client.test("HTTP 403", () => client.assert(response.status === 403, "Ожидался 403, получен " + response.status));
+%}
+
+### Анна снимает замечание
+POST http://localhost:8080/api/editorial-comments/{{c3Id}}/dismiss
+Content-Type: application/json
+
+{
+  "userId": {{editorId}}
+}
+
+> {%
+    client.test("HTTP 200", () => client.assert(response.status === 200, "Ожидался 200, получен " + response.status));
+    client.test("status = REJECTED", () => client.assert(response.body["status"] === "REJECTED"));
+%}
+
+### Анна утверждает последний сегмент → проект в REVIEW
+POST http://localhost:8080/api/translations/{{t2Id}}/approve
+Content-Type: application/json
+
+{
+  "userId": {{editorId}}
+}
+
+> {%
+    client.test("HTTP 200", () => client.assert(response.status === 200, "Ожидался 200, получен " + response.status));
+    client.test("translation.status = APPROVED", () => client.assert(response.body["translation"]["status"] === "APPROVED"));
+    client.test("project.status = REVIEW", () => client.assert(response.body["project"]["status"] === "REVIEW"));
+%}
+
+### ✗ Добавить сегмент в проект на REVIEW → 409
+POST http://localhost:8080/api/source-segments
+Content-Type: application/json
+
+{
+  "projectId": {{projectId}},
+  "sourceText": "Поздно"
+}
+
+> {%
+    client.test("HTTP 409", () => client.assert(response.status === 409, "Ожидался 409, получен " + response.status));
+%}
+
+### ================= 12. БО-7 Завершение и БО-8 Архивирование =================
+### REVIEW → COMPLETED → ARCHIVED. После завершения проект неизменяем.
+
+### ✗ Завершение не владельцем → 403
+POST http://localhost:8080/api/translation-projects/{{projectId}}/complete
+Content-Type: application/json
+
+{
+  "userId": {{translatorId}}
+}
+
+> {%
+    client.test("HTTP 403", () => client.assert(response.status === 403, "Ожидался 403, получен " + response.status));
+%}
+
+### Анна завершает проект
+POST http://localhost:8080/api/translation-projects/{{projectId}}/complete
+Content-Type: application/json
+
+{
+  "userId": {{editorId}}
+}
+
+> {%
+    client.test("HTTP 200", () => client.assert(response.status === 200, "Ожидался 200, получен " + response.status));
+    client.test("status = COMPLETED", () => client.assert(response.body["status"] === "COMPLETED"));
+%}
+
+### ✗ Удалить автора утверждённого перевода → 409
+DELETE http://localhost:8080/api/users/{{translatorId}}
+
+> {%
+    client.test("HTTP 409", () => client.assert(response.status === 409, "Ожидался 409, получен " + response.status));
+%}
+
+### Отправить проект в архив
+POST http://localhost:8080/api/translation-projects/{{projectId}}/archive
+Content-Type: application/json
+
+{
+  "userId": {{editorId}}
+}
+
+> {%
+    client.test("HTTP 200", () => client.assert(response.status === 200, "Ожидался 200, получен " + response.status));
+    client.test("status = ARCHIVED", () => client.assert(response.body["status"] === "ARCHIVED"));
+%}
+
+### ✗ Изменить архивный проект → 409
+PATCH http://localhost:8080/api/translation-projects/{{projectId}}
+Content-Type: application/json
+
+{
+  "name": "Новое имя"
+}
+
+> {%
+    client.test("HTTP 409", () => client.assert(response.status === 409, "Ожидался 409, получен " + response.status));
+%}
+
+### ✗ Удалить перевод из архива → 409
+DELETE http://localhost:8080/api/translations/{{t1Id}}
+
+> {%
+    client.test("HTTP 409", () => client.assert(response.status === 409, "Ожидался 409, получен " + response.status));
+%}
+
+### ================= 13. Каскадное удаление =================
+### Удаление проекта удаляет сегменты, переводы и замечания — недействительных ссылок не остаётся.
+
+### Удалить проект
+DELETE http://localhost:8080/api/translation-projects/{{projectId}}
+
+> {%
+    client.test("HTTP 204", () => client.assert(response.status === 204, "Ожидался 204, получен " + response.status));
+%}
+
+### Сегмент удалён → 404
+GET http://localhost:8080/api/source-segments/{{seg1Id}}
+
+> {%
+    client.test("HTTP 404", () => client.assert(response.status === 404, "Ожидался 404, получен " + response.status));
+%}
+
+### Перевод удалён → 404
+GET http://localhost:8080/api/translations/{{t1Id}}
+
+> {%
+    client.test("HTTP 404", () => client.assert(response.status === 404, "Ожидался 404, получен " + response.status));
+%}
+
+### Замечание удалено → 404
+GET http://localhost:8080/api/editorial-comments/{{c1Id}}
+
+> {%
+    client.test("HTTP 404", () => client.assert(response.status === 404, "Ожидался 404, получен " + response.status));
+%}
+
+### Теперь Бориса можно удалить
+DELETE http://localhost:8080/api/users/{{translatorId}}
+
+> {%
+    client.test("HTTP 204", () => client.assert(response.status === 204, "Ожидался 204, получен " + response.status));
+%}
+
+### Редактор на месте
+GET http://localhost:8080/api/users/{{editorId}}
+
+> {%
+    client.test("HTTP 200", () => client.assert(response.status === 200, "Ожидался 200, получен " + response.status));
+%}
